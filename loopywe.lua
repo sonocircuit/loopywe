@@ -1,0 +1,561 @@
+--   loopywe v0.1.0 @sonoCircuit
+--
+--     a looper for my friend
+--     
+--           - domiwe -
+--
+
+
+--------- variables ----------
+local NUM_TRACKS = 2 -- bump up to 6 for more tracks > screen will look a bit weird though.
+local PPQN = 96
+local FADE_TIME = 0.08
+local MAX_LENGTH = 64
+
+local beat_sec = 60 / params:get("clock_tempo")
+
+local ui = {}
+ui.k1 = false
+ui.k2 = false
+ui.k3 = false
+ui.coin = false
+ui.clr_clk = nil
+ui.param_focus = 1
+ui.param_ids = {"level", "pan", "cutoff", "resonance", "rec", "dub", "tape_length", "frez_length", "frez_rate", "rate_slew"}
+ui.param_names = {"level", "pan", "cutoff", "resonanz", "rec", "dub", "tape", "frz  size", "frz  rate", "slew"}
+
+local mtr = {}
+mtr.count = 1
+mtr.clock = nil
+mtr.is_running = false
+
+local trk = {}
+trk.focus = 1
+trk.rec_queued = false
+trk.is_recording = false
+trk.is_resetting = false
+trk.is_clearing = false
+trk.rate_options = {"-200%", "-150%", "-100%", "-75%", "-50%", "50%", "75%", "100%", "150%", "200%"}
+trk.rate_values = {-2, -1.5, -1, -0.75, -0.5, 0.5, 0.75, 1, 1.5, 2}
+trk.freeze_options  = {"1/8", "1/6", "3/16", "1/4", "1/3", "3/8", "1/2", "2/3", "3/4", "1", "5/4", "4/3", "3/2"," 5/3", "7/4"}
+trk.freeze_values = {1/8, 1/6, 3/16, 1/4, 1/3, 3/8, 1/2, 2/3, 3/4, 1, 5/4, 4/3, 3/2, 5/3, 7/4}
+
+for i = 1, NUM_TRACKS do  
+  trk[i] = {}
+  trk[i].lvl = 1
+  trk[i].pan = 0
+  trk[i].rec = 1
+  trk[i].dub = 1
+  trk[i].fz_rate = 1 -- freeze rate
+  trk[i].fz_pos = 1 -- freeze reset postion
+  trk[i].fz_tik = 1 -- current step of ppqn resolution
+  trk[i].fz_max = 1 -- freeue loop length
+  trk[i].fz_queued = false
+  trk[i].fz_active = false
+  trk[i].is_playing = true
+  trk[i].beat_num = 8 -- track length in beats
+  trk[i].pos = 0 -- buffer postion in seconds
+  trk[i].step = 0 -- current step
+  trk[i].step_max = trk[i].beat_num * PPQN -- number of steps
+  trk[i].s = 1 + (i - 1) * MAX_LENGTH -- start pos in seconds
+  trk[i].l = trk[i].beat_num * beat_sec -- length in seconds
+  trk[i].e = trk[i].s + trk[i].l -- end pos in seconds
+  trk[i].d = trk[i].l / trk[i].step_max -- step size in seconds
+end
+
+--------- functions ----------
+
+local function set_level(i)
+  if trk[i].is_playing then
+    softcut.level(i, trk[i].lvl)
+  else
+    softcut.level(i, 0)
+  end
+end
+
+local function toggle_levels(i)
+  trk[i].is_playing = not trk[i].is_playing
+  set_level(i)
+end
+
+local function set_rec()
+  if trk.is_recording then
+    softcut.rec_level(trk.focus, trk[trk.focus].rec)
+    softcut.pre_level(trk.focus, trk[trk.focus].dub)
+    ui.coin = true
+  else
+    for i = 1, NUM_TRACKS do
+      softcut.rec_level(i, 0)
+      softcut.pre_level(i, 1)
+    end
+  end
+end
+
+local function toggle_rec()
+  if trk.is_recording or trk[trk.focus].fz_active then
+    trk.is_recording = false
+    trk.rec_queued = false
+    set_rec()
+  else
+    trk.rec_queued = not trk.rec_queued
+  end
+end
+
+function set_length(i, num_beats)
+  trk[i].l = num_beats * beat_sec
+  trk[i].e = trk[i].s + trk[i].l
+  softcut.loop_end(i, trk[i].e)
+  trk[i].step_max = num_beats * PPQN
+  trk[i].d = trk[i].l / trk[i].step_max
+  -- set phase quant
+  local q = (trk[i].l / 120)
+  local off = util.round((math.ceil(trk[i].s / q) * q) - trk[i].s, 0.001)
+  softcut.phase_quant(i, q)
+  softcut.phase_offset(i, off)
+end
+
+local function reset_pos(i)
+  if trk[i].fz_active == false then
+    softcut.position(i, trk[i].s)
+  end
+  trk[i].step = 0
+  if trk.focus == i then
+    if trk.rec_queued then
+      trk.is_recording = true
+      trk.rec_queued = false
+    elseif trk.is_recording then
+      trk.is_recording = false
+    end
+    set_rec()
+  end
+end
+
+local function reset_tracks()
+  trk.is_resetting = true
+  clock.run(function()
+    clock.sync(4)
+    for i = 1, NUM_TRACKS do
+      reset_pos(i)
+    end
+    trk.is_resetting = false
+  end)
+end
+
+local function clear_buffer()
+  clock.sleep(1.2)
+  softcut.buffer_clear_region_channel(1, trk[trk.focus].s - FADE_TIME, MAX_LENGTH + FADE_TIME)
+  trk.is_clearing = true
+  clock.sleep(0.8)
+  trk.is_clearing = false
+  clr_clk = nil
+end
+
+local function set_cutoff(i, val)
+  if val < -0.1 then -- lp
+    local val = -val
+    freq = util.linexp(0.1, 1, 12000, 80, val)
+    softcut.post_filter_fc(i, freq)
+    softcut.post_filter_lp(i, 1)
+    softcut.post_filter_hp(i, 0)
+  elseif val > 0.1 then -- hp
+    freq = util.linexp(0.1, 1, 20, 8000, val)
+    softcut.post_filter_fc(i, freq)
+    softcut.post_filter_hp(i, 1)
+    softcut.post_filter_lp(i, 0)
+  else
+    softcut.post_filter_fc(i, val > 0 and 20 or 12000)
+    softcut.post_filter_lp(i, val > 0 and 0 or 1)
+    softcut.post_filter_hp(i, val > 0 and 1 or 0)
+  end
+end
+
+local function set_filter_q(i, val) -- from ezra's softcut eq class (thank you!)
+  local x = 1 - val
+  local rq = 2.15821131e-01 + (x * 2.29231176e-09) + (x * x * 3.41072934)
+  softcut.post_filter_rq(i, rq)
+end
+
+local function phase_poll(i, pos)
+  trk[i].pos = math.floor(util.linlin(0, 1, 1, 120, (pos - trk[i].s) / trk[i].l))
+end
+
+
+---- clock coroutines and callbacks ----
+local function tempo_change_callback()
+  beat_sec = 60 / params:get("clock_tempo")
+  for i = 1, NUM_TRACKS do
+    set_length(i, trk[i].beat_num)
+  end
+end
+
+local function transport_start_callback()
+  mtr.count = 0
+  mtr.is_running = true
+  for i = 1, NUM_TRACKS do
+    reset_pos(i)
+    set_level(i)
+  end
+end
+
+local function transport_stop_callback()
+  mtr.is_running = false
+  trk.is_recording = false
+  trk.rec_queued = false
+  for i = 1, NUM_TRACKS do
+    softcut.level(i, 0)
+    softcut.rec_level(i, 0)
+    softcut.pre_level(i, 1)
+    trk[i].fz_queued = false
+  end
+end
+
+local function metro_clock()
+  while true do
+    clock.sync(1)
+    mtr.count = util.wrap(mtr.count + 1, 1, 4)
+    ui.coin = not ui.coin
+  end
+end
+
+local function pos_clock(i)
+  while true do
+    clock.sync(trk[i].beat_num)
+    reset_pos(i)
+  end
+end
+
+local function freez_clock(i)
+  while true do
+    clock.sync(1/4) -- quantize to 1/16
+    if trk[i].fz_queued then
+      if trk[i].fz_active == false then
+        trk[i].fz_active = true
+        trk[i].fz_pos = trk[i].s + trk[i].d * (trk[i].step - 1)
+        trk[i].fz_tik = 0
+        softcut.position(i, trk[i].fz_pos)
+        softcut.rate(i, trk[i].fz_rate)
+      end
+    else
+      if trk[i].fz_active then
+        trk[i].fz_active = false
+        local fpos = trk[i].s + (trk[i].l / trk[i].step_max) * (trk[i].step - 1)
+        softcut.position(i, fpos)
+        softcut.rate(i, 1)
+      end
+    end
+  end
+end
+
+local function step_clock(i)
+  while true do
+    clock.sync(1 / PPQN)
+    if trk[i].fz_active then
+      if trk[i].fz_tik >= trk[i].fz_max then
+        softcut.position(i, trk[i].fz_pos)
+        trk[i].fz_tik = 0
+      end
+      trk[i].fz_tik = trk[i].fz_tik + 1
+    end
+    trk[i].step = trk[i].step + 1
+  end
+end
+
+
+--------- params ----------
+local function round_form(param, quant, form)
+  return(util.round(param, quant)..form)
+end
+
+local function pan_display(param)
+  if param < -0.01 then
+    return ("L < "..math.abs(util.round(param * 100, 1)))
+  elseif param > 0.01 then
+    return (math.abs(util.round(param * 100, 1)).." > R")
+  else
+    return "> <"
+  end
+end
+
+local function cutoff_display(i, param)
+  if param < -0.1 then
+    local p = math.abs(util.round(util.linlin(-1, -0.1, -100, -1, param), 1))
+    return "lp < " ..p
+  elseif param > 0.1 then
+    local p = math.abs(util.round(util.linlin(0.1, 1, 1, 100, param), 1))
+    return p.." > hp"
+  else
+    return "|"
+  end
+end
+
+local function init_params()
+  params:add_separator("lwee_params", "loopywee")
+  for i = 1, NUM_TRACKS do
+    params:add_group("lwee_track_"..i, "track "..i, 14)
+
+    params:add_separator("lwee_levels"..i, "levels")
+    
+    params:add_control("lwee_level_"..i, "level", controlspec.new(0, 1, 'lin', 0, 1, ""), function(param) return (round_form(param:get() * 100, 1, "%")) end)
+    params:set_action("lwee_level_"..i, function(x) trk[i].lvl = x set_level(i) end)
+
+    params:add_control("lwee_pan_"..i, "pan", controlspec.new(-1, 1, 'lin', 0, 0, ""), function(param) return pan_display(param:get()) end)
+    params:set_action("lwee_pan_"..i, function(x) trk[i].pan = x softcut.pan(i, x) end)
+
+    params:add_control("lwee_rec_"..i, "rec", controlspec.new(0, 1, 'lin', 0, 1, ""), function(param) return (round_form(param:get() * 100, 1, "%")) end)
+    params:set_action("lwee_rec_"..i, function(x) trk[i].rec = x set_rec() end)
+
+    params:add_control("lwee_dub_"..i, "dub", controlspec.new(0, 1, 'lin', 0, 1, ""), function(param) return (round_form(param:get() * 100, 1, "%")) end)
+    params:set_action("lwee_dub_"..i, function(x) trk[i].dub = x set_rec() end)
+
+    params:add_separator("lwee_filter"..i, "filter")
+
+    params:add_control("lwee_cutoff_"..i, "cutoff", controlspec.new(-1, 1, 'lin', 0, 0, ""), function(param) return cutoff_display(i, param:get()) end)
+    params:set_action("lwee_cutoff_"..i, function(x) set_cutoff(i, x) end)
+
+    params:add_control("lwee_resonance_"..i, "resonance", controlspec.new(0, 1, 'lin', 0, 0.2, ""), function(param) return (round_form(param:get() * 100, 1, "%")) end)
+    params:set_action("lwee_resonance_"..i, function(x) set_filter_q(i, x) end)
+
+    params:add_separator("lwee_tape_"..i, "tape")
+
+    params:add_number("lwee_tape_length_"..i, "tape length", 2, 64, (8 * i), function(param) return param:get().."beats" end)
+    params:set_action("lwee_tape_length_"..i, function(x) trk[i].beat_num = x set_length(i, x) end)
+
+    params:add_option("lwee_frez_length_"..i, "freeze size", trk.freeze_options, 7)
+    params:set_action("lwee_frez_length_"..i, function(x) trk[i].fz_max = trk.freeze_values[x] * PPQN end)
+
+    params:add_option("lwee_frez_rate_"..i, "freeze rate", trk.rate_options, 8)
+    params:set_action("lwee_frez_rate_"..i, function(x) trk[i].fz_rate = trk.rate_values[x] if trk[i].fz_active then softcut.rate(i, trk[i].fz_rate) end end)
+
+    params:add_control("lwee_rate_slew_"..i, "rate slew", controlspec.new(0, 1, 'lin', 0, 0, ""), function(param) return (round_form(param:get(), 0.01, "s")) end)
+    params:set_action("lwee_rate_slew_"..i, function(x) softcut.rate_slew_time(i, x) end)
+
+    params:add_binary("lwee_freeze_trig_"..i, "freeze", "momentary")
+    params:set_action("lwee_freeze_trig_"..i, function(x) trk[i].fz_queued = x == 1 and true or false end)
+  end
+  params:bang()
+end
+
+--------- softcut ----------
+local function init_softcut()
+  audio.level_adc_cut(1)
+  audio.level_eng_cut(1)
+  for i = 1, NUM_TRACKS do
+    softcut.enable(i, 1)
+    softcut.buffer(i, 1)
+
+    softcut.level_input_cut(1, i, 0.707)
+    softcut.level_input_cut(2, i, 0.707)
+
+    softcut.play(i, 1)
+    softcut.rec(i, 1)
+    
+    softcut.level(i, 0)
+    softcut.pan(i, 0)
+
+    softcut.pre_level(i, 1)
+    softcut.rec_level(i, 0)
+
+    softcut.pre_filter_dry(i, 1)
+    softcut.pre_filter_lp(i, 0)
+    
+    softcut.post_filter_dry(i, 0)
+    softcut.post_filter_lp(i, 1)
+    softcut.post_filter_fc(i, 12000)
+    softcut.post_filter_rq(i, 2)
+
+    softcut.fade_time(i, FADE_TIME)
+    softcut.level_slew_time(i, 0.4)
+    softcut.pan_slew_time(i, 0.2)
+    softcut.rate_slew_time(i, 0)
+    softcut.rate(i, 1)
+
+    softcut.loop_start(i, trk[i].s)
+    softcut.loop_end(i, trk[i].e)
+    softcut.loop(i, 1)
+    softcut.position(i, trk[i].s)
+  end
+  softcut.event_phase(phase_poll)
+  softcut.poll_start_phase()
+end
+
+--------- init function ----------
+function init()
+  -- init stuff
+  init_softcut()
+  init_params()
+  -- set callbacks
+  clock.tempo_change_handler = tempo_change_callback
+  clock.transport.start = transport_start_callback
+  clock.transport.stop = transport_stop_callback
+  -- run clocks
+  clock.run(function()
+    clock.sync(4)
+    mtr.count = 1
+    mtr.is_running = true
+    clock.run(metro_clock)
+    for i = 1, NUM_TRACKS do
+      clock.run(pos_clock, i)
+      clock.run(step_clock, i)
+      clock.run(freez_clock, i)
+      softcut.position(i, trk[i].s)
+    end
+  end)
+  -- call redraw
+  redraw()
+end
+
+--------- norns UI ----------
+function key(n, z)
+  if n == 1 then
+    ui.k1 = z == 1 and true or false
+  end
+  if n == 2 then
+    ui.k2 = z == 1 and true or false
+    if ui.k1 then
+      if z == 1 then
+        if ui.clr_clk ~= nil then
+          clock.cancel(ui.clr_clk)
+        end
+        ui.clr_clk = clock.run(clear_buffer)
+      else
+        if trk.is_clearing == false then
+          if ui.clr_clk ~= nil then
+            clock.cancel(ui.clr_clk)
+          end
+          reset_tracks()
+        end
+      end
+    else
+      if z == 1 and not ui.k3 then
+        toggle_rec()
+      end
+    end
+  elseif n == 3 then
+    ui.k3 = z == 1 and true or false
+    if ui.k1 then
+      if z == 1 then
+        toggle_levels(trk.focus)
+      end
+    else
+      trk[trk.focus].fz_queued = z == 1 and true or (ui.k2 and true or false)
+    end
+  end
+end
+
+function enc(n, d)
+  if n == 1 then
+    trk.focus = util.clamp(trk.focus + d, 1, NUM_TRACKS)
+  elseif n == 2 then
+    ui.param_focus = util.clamp(ui.param_focus + d, 1, #ui.param_ids)
+  elseif n == 3 then
+    if ui.k1 then
+      for i = 1, NUM_TRACKS do
+        params:delta("lwee_"..ui.param_ids[ui.param_focus].."_"..i, d)
+      end
+    else
+      params:delta("lwee_"..ui.param_ids[ui.param_focus].."_"..trk.focus, d)
+    end
+  end
+end
+
+function redraw()
+  screen.clear()
+  -- track focus
+  screen.font_face(2)
+  screen.font_size(7)
+  screen.move(4, 12)
+  screen.level(15)
+  screen.text(trk.focus)
+  -- metronome
+  for i = 1, 4 do
+    screen.level(mtr.is_running and (mtr.count == i and 15 or 4) or 1)
+    screen.rect(110 + (i - 1) * 4, 6, 2, 6)
+    screen.fill()
+  end
+  -- indicators
+  if trk.is_recording then
+    screen.level(ui.coin and 15 or 0)
+    screen.rect(45, 4, 39, 12)
+    screen.fill()
+    screen.move(64, 12)
+    screen.level(ui.coin and 0 or 15)
+    screen.text_center("recording")
+  elseif trk.rec_queued then
+    screen.move(64, 12)
+    screen.level(4)
+    screen.text_center("rec   queued")
+  elseif trk.is_resetting then
+    screen.move(64, 12)
+    screen.level(15)
+    screen.text_center("resetting...")
+  elseif trk.is_clearing then
+    screen.move(64, 12)
+    screen.level(15)
+    screen.text_center("cleared")
+  else
+    if ui.k1 then
+      screen.level(10)
+      screen.move(48, 12)
+      screen.text_center("rst/clr")
+      screen.level(ui.coin and 10 or 15)
+      screen.move(80, 12)
+      screen.text_center(trk[trk.focus].is_playing and "mute" or "unmute")
+    elseif trk[trk.focus].fz_active then
+      screen.level(ui.coin and 15 or 0)
+      screen.rect(45, 4, 39, 12)
+      screen.fill()
+      screen.move(64, 12)
+      screen.level(ui.coin and 0 or 15)
+      screen.text_center("freeeeze")
+    end
+  end
+  -- track lane
+  local lane_y = 31 - 2 * NUM_TRACKS
+  local lane_space = 15 - 2 * NUM_TRACKS
+  local head_size = 6 
+  for i = 1, NUM_TRACKS do
+    screen.level(trk.focus == i and 2 or 1)
+    screen.move(4, lane_y + (i -1) * lane_space)
+    screen.line_width(2)
+    screen.line_rel(120, 0)
+    screen.stroke()
+    if mtr.is_running then
+      screen.level(trk[i].is_playing and 15 or 4)
+      screen.move(4 + trk[i].pos, lane_y - (head_size / 2) + (i -1) * lane_space)
+      screen.line_width(1)
+      screen.line_rel(0, head_size)
+      screen.stroke()
+    end
+  end
+  -- params
+  screen.level(4)
+  if ui.param_focus > 1 then
+    screen.move(44, 57)
+    screen.text_center("<")
+    screen.move(28, 57)
+    screen.text_right(ui.param_names[ui.param_focus - 1])
+  end
+  if ui.param_focus < #ui.param_ids then
+    screen.move(84, 57)
+    screen.text_center(">")
+    screen.move(100, 57)
+    screen.text(ui.param_names[ui.param_focus + 1])
+  end
+  screen.level(8)
+  screen.move(64, 52)
+  screen.text_center(ui.param_names[ui.param_focus])
+  screen.level(15)
+  screen.move(64, 62)
+  screen.text_center(params:string("lwee_"..ui.param_ids[ui.param_focus].."_"..trk.focus))
+  
+  screen.update()
+end
+
+function refresh()
+	redraw()
+end
+
+--------- cleanup ----------
+function cleanup()
+  --
+end
