@@ -1,15 +1,18 @@
---   loopywe v0.1.1 @sonoCircuit
+--   loopywe v0.1.2 @sonoCircuit
 --
 --     a looper for my friend
 --     
 --           - domiwe -
 --
 
+local md = require 'core/mods'
+
 --------- variables ----------
-local NUM_TRACKS = 2 -- bump up to 6 for more tracks > screen will look a bit weird though.
+local NUM_TRACKS = 2 -- bump up to 6 for more tracks
 local PPQN = 96
 local FADE_TIME = 0.08
-local MAX_LENGTH = 64
+local BUFFER = math.pow(2, 24) / 48000
+local MAX_LENGTH = math.floor(BUFFER / NUM_TRACKS) - 1 -- 1-6 voices: 348/173/115/86/68/57 sec
 
 local beat_sec = 60 / params:get("clock_tempo")
 
@@ -17,8 +20,12 @@ local ui = {}
 ui.k1 = false
 ui.k2 = false
 ui.k3 = false
+ui.sec = false
 ui.coin = false
-ui.k2_options = false
+ui.confirm = false
+ui.lane_y = {33, 27, 25, 24, 23, 22}
+ui.lane_space = {15, 11, 8, 6, 5, 4}
+ui.head_size = {8, 8, 6, 4, 4, 4}
 ui.param_focus = 1
 ui.param_ids = {"level", "pan", "cutoff", "resonance", "rec", "dub", "tape_length", "frez_length", "frez_rate", "rate_slew", "frez_mode", "frez_quant"}
 ui.param_names = {"level", "pan", "cutoff", "resonanz", "rec", "dub", "tape", "fz  size", "fz  rate", "rate  slew", "fz  mode", "fz  quant"}
@@ -29,7 +36,7 @@ mtr.count = 1
 mtr.clock = nil
 mtr.is_running = false
 
-trk = {}
+local trk = {}
 trk.focus = 1
 trk.rec_queued = false
 trk.is_recording = false
@@ -62,7 +69,7 @@ for i = 1, NUM_TRACKS do
   trk[i].pos = 0 -- buffer postion in seconds
   trk[i].step = 0 -- current step
   trk[i].step_max = trk[i].beat_num * PPQN -- number of steps
-  trk[i].s = 1 + (i - 1) * MAX_LENGTH -- start pos in seconds
+  trk[i].s = 1 * i + (i - 1) * MAX_LENGTH -- start pos in seconds
   trk[i].l = trk[i].beat_num * beat_sec -- length in seconds
   trk[i].e = trk[i].s + trk[i].l -- end pos in seconds
   trk[i].d = trk[i].l / trk[i].step_max -- step size in seconds
@@ -125,16 +132,22 @@ local function toggle_rec()
 end
 
 function set_length(i, num_beats)
-  trk[i].l = num_beats * beat_sec
-  trk[i].e = trk[i].s + trk[i].l
-  softcut.loop_end(i, trk[i].e + FADE_TIME) -- adding fade improves startpoint reset.
-  trk[i].step_max = num_beats * PPQN
-  trk[i].d = trk[i].l / trk[i].step_max
-  -- set phase quant
-  local q = (trk[i].l / 120)
-  local off = util.round((math.ceil(trk[i].s / q) * q) - trk[i].s, 0.001)
-  softcut.phase_quant(i, q)
-  softcut.phase_offset(i, off)
+  local length = num_beats * beat_sec
+  if length > MAX_LENGTH then
+    params:set("lw_tape_length_"..i, num_beats - 1)
+  else
+    trk[i].beat_num = num_beats
+    trk[i].l = length
+    trk[i].e = trk[i].s + trk[i].l
+    softcut.loop_end(i, trk[i].e + FADE_TIME) -- adding fade improves startpoint reset.
+    trk[i].step_max = num_beats * PPQN
+    trk[i].d = trk[i].l / trk[i].step_max
+    -- set phase quant
+    local q = (trk[i].l / 120)
+    local off = util.round((math.ceil(trk[i].s / q) * q) - trk[i].s, 0.001)
+    softcut.phase_quant(i, q)
+    softcut.phase_offset(i, off)
+  end
 end
 
 local function reset_pos(i)
@@ -312,7 +325,7 @@ end
 local function init_params()
   params:add_separator("lw_params", "loopywee")
   for i = 1, NUM_TRACKS do
-    params:add_group("lw_track_"..i, "track "..i, 15)
+    params:add_group("lw_track_"..i, "track "..i, 18)
 
     params:add_separator("lw_levels"..i, "levels")
     
@@ -338,16 +351,16 @@ local function init_params()
 
     params:add_separator("lw_tape_"..i, "tape")
 
-    params:add_number("lw_tape_length_"..i, "tape length", 2, 64, (8 * i), function(param) return param:get().."beats" end)
-    params:set_action("lw_tape_length_"..i, function(x) trk[i].beat_num = x set_length(i, x) end)
+    params:add_number("lw_tape_length_"..i, "tape length", 2, 128, (math.floor(math.pow(2, i + 1))), function(param) return param:get().."beats" end)
+    params:set_action("lw_tape_length_"..i, function(x) set_length(i, x) end)
 
-    params:add_option("lw_frez_mode_"..i, "freeze mode", {"momt", "hold"}, 1)
+    params:add_option("lw_frez_mode_"..i, "freeze mode", {"mom", "tog"}, 1)
     params:set_action("lw_frez_mode_"..i, function(x) trk[i].fz_mode = x end)
 
-    params:add_option("lw_frez_quant_"..i, "freeze quant", trk.quant_options, 4)
+    params:add_option("lw_frez_quant_"..i, "freeze quant", trk.quant_options, 7)
     params:set_action("lw_frez_quant_"..i, function(x) trk[i].fz_qnt = math.floor(trk.quant_values[x] * 4 * PPQN) end)
 
-    params:add_option("lw_frez_length_"..i, "freeze size", trk.freeze_options, 4)
+    params:add_option("lw_frez_length_"..i, "freeze size", trk.freeze_options, 7)
     params:set_action("lw_frez_length_"..i, function(x) trk[i].fz_max = math.floor(trk.freeze_values[x] * 4 * PPQN) end)
 
     params:add_option("lw_frez_rate_"..i, "freeze rate", trk.rate_options, 8)
@@ -356,9 +369,20 @@ local function init_params()
     params:add_control("lw_rate_slew_"..i, "rate slew", controlspec.new(0, 1, 'lin', 0, 0, ""), function(param) return (round_form(param:get(), 0.01, "s")) end)
     params:set_action("lw_rate_slew_"..i, function(x) softcut.rate_slew_time(i, x) end)
 
+    params:add_separator("lw_ctrl_"..i, "control")
+
     params:add_binary("lw_freeze_trig_"..i, "freeze", "momentary")
     params:set_action("lw_freeze_trig_"..i, function(z) set_freeze(i, z) end)
+
+    params:add_binary("lw_mute_trig_"..i, "mute", "momentary")
+    params:set_action("lw_mute_trig_"..i, function(z) if z == 1 then toggle_levels(i) end end)
   end
+
+    -- fx separator
+  if md.is_loaded("fx") then
+    params:add_separator("fx_params", "fx")
+  end
+
   params:bang()
 end
 
@@ -432,39 +456,44 @@ end
 function key(n, z)
   if n == 1 then
     ui.k1 = z == 1 and true or false
-    if z == 0 then ui.k2_options = false end
+    if z == 0 then ui.confirm = false end
   end
   if n == 2 then
     ui.k2 = z == 1 and true or false
     if ui.k1 then
-      if ui.k2_options then
+      if ui.confirm then
+        if z == 1 then ui.confirm = false end
+      elseif ui.sec then
         if z == 1 then
-          reset_tracks()
+          toggle_levels(trk.focus)
         end
       else
-        if z == 1 then ui.k2_options = true end
+        if z == 1 then
+          ui.confirm = true
+        end
       end
-    else
-      if z == 1 and not ui.k3 then
-        toggle_rec()
-      end
+    elseif z == 1 and not ui.k3 then
+      toggle_rec()      
     end
   elseif n == 3 then
     ui.k3 = z == 1 and true or false
     if ui.k1 then
-      if ui.k2_options then
-        if z == 1 then
-          trk.is_clearing = true
-          backup_buffer("clear")
-          clock.run(function()
-            clock.sleep(0.8)
-            trk.is_clearing = false
-            trk[trk.focus].undo_enabled = false
-          end)
+      if ui.confirm then
+        trk.is_clearing = true
+        backup_buffer("clear")
+        clock.run(function()
+          clock.sleep(0.8)
+          trk.is_clearing = false
+          trk[trk.focus].undo_enabled = false
+        end)
+        ui.confirm = false
+      elseif ui.sec then
+        for i = 1, NUM_TRACKS do
+          set_freeze(i, z)
         end
       else
         if z == 1 then
-          toggle_levels(trk.focus)
+          reset_tracks()
         end
       end
     else
@@ -475,7 +504,11 @@ end
 
 function enc(n, d)
   if n == 1 then
-    trk.focus = util.clamp(trk.focus + d, 1, NUM_TRACKS)
+    if ui.k1 then
+      ui.sec = d > 0 and true or false
+    else
+      trk.focus = util.clamp(trk.focus + d, 1, NUM_TRACKS)
+    end
   elseif n == 2 then
     ui.param_focus = util.clamp(ui.param_focus + d, 1, #ui.param_ids)
   elseif n == 3 then
@@ -518,27 +551,39 @@ function redraw()
   elseif trk.is_resetting then
     screen.move(64, 12)
     screen.level(15)
-    screen.text_center("resetting...")
+    screen.text_center("resetting... "..(5 - mtr.count))
   elseif trk.is_clearing then
     screen.move(64, 12)
     screen.level(15)
     screen.text_center(trk[trk.focus].undo_enabled and "undone" or "cleared")
   else
     if ui.k1 then
-      if ui.k2_options then
-        screen.level(ui.coin and 15 or 10)
-        screen.move(48, 12)
-        screen.text_center("reset")
-        screen.level(ui.coin and 10 or 15)
-        screen.move(80, 12)
-        screen.text_center(trk[trk.focus].undo_enabled and "undo" or "clear")
-      else
-        screen.level(10)
-        screen.move(48, 12)
-        screen.text_center(trk[trk.focus].undo_enabled and "rst/undo" or "rst/clear")
-        screen.level(ui.coin and 10 or 15)
-        screen.move(80, 12)
+      if ui.sec then
+        screen.level(trk[trk.focus].is_playing and 10 or (ui.coin and 15 or 6))
+        screen.move(46, 12)
         screen.text_center(trk[trk.focus].is_playing and "mute" or "unmute")
+        screen.level(10)
+        screen.move(82, 12)
+        screen.text_center("freez*")
+      else
+        if ui.confirm then
+          screen.level(ui.coin and 15 or 4)
+          screen.move(40, 12)
+          screen.text_center("no")
+          screen.level(4)
+          screen.move(64, 12)
+          screen.text_center(trk[trk.focus].undo_enabled and "undo?" or "clear?")
+          screen.level(ui.coin and 4 or 15)
+          screen.move(88, 12)
+          screen.text_center("yes")
+        else
+          screen.level(10)
+          screen.move(46, 12)
+          screen.text_center(trk[trk.focus].undo_enabled and "undo" or "clear")
+          screen.level(10)
+          screen.move(82, 12)
+          screen.text_center("reset")
+        end
       end
     elseif trk[trk.focus].fz_active then
       screen.level(ui.coin and 15 or 0)
@@ -550,20 +595,17 @@ function redraw()
     end
   end
   -- track lane
-  local lane_y = 31 - 2 * NUM_TRACKS
-  local lane_space = 15 - 2 * NUM_TRACKS
-  local head_size = 6 
   for i = 1, NUM_TRACKS do
     screen.level(trk.focus == i and 2 or 1)
-    screen.move(4, lane_y + (i -1) * lane_space)
+    screen.move(4, ui.lane_y[NUM_TRACKS] + (i - 1) * ui.lane_space[NUM_TRACKS])
     screen.line_width(2)
     screen.line_rel(120, 0)
     screen.stroke()
     if mtr.is_running then
-      screen.level(trk[i].is_playing and 15 or 4)
-      screen.move(4 + trk[i].pos, lane_y - (head_size / 2) + (i -1) * lane_space)
+      screen.level(trk[i].is_playing and 15 or 3)
+      screen.move(4 + trk[i].pos, ui.lane_y[NUM_TRACKS] - (ui.head_size[NUM_TRACKS] / 2) + (i -1) * ui.lane_space[NUM_TRACKS])
       screen.line_width(1)
-      screen.line_rel(0, head_size)
+      screen.line_rel(0, ui.head_size[NUM_TRACKS])
       screen.stroke()
     end
   end
@@ -597,5 +639,5 @@ end
 
 --------- cleanup ----------
 function cleanup()
-  --
+  
 end
