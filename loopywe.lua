@@ -1,10 +1,9 @@
---   loopywe v0.1.0 @sonoCircuit
+--   loopywe v0.1.1 @sonoCircuit
 --
 --     a looper for my friend
 --     
 --           - domiwe -
 --
-
 
 --------- variables ----------
 local NUM_TRACKS = 2 -- bump up to 6 for more tracks > screen will look a bit weird though.
@@ -19,17 +18,18 @@ ui.k1 = false
 ui.k2 = false
 ui.k3 = false
 ui.coin = false
-ui.clr_clk = nil
+ui.k2_options = false
 ui.param_focus = 1
-ui.param_ids = {"level", "pan", "cutoff", "resonance", "rec", "dub", "tape_length", "frez_length", "frez_rate", "rate_slew"}
-ui.param_names = {"level", "pan", "cutoff", "resonanz", "rec", "dub", "tape", "frz  size", "frz  rate", "slew"}
+ui.param_ids = {"level", "pan", "cutoff", "resonance", "rec", "dub", "tape_length", "frez_length", "frez_rate", "rate_slew", "frez_mode", "frez_quant"}
+ui.param_names = {"level", "pan", "cutoff", "resonanz", "rec", "dub", "tape", "fz  size", "fz  rate", "rate  slew", "fz  mode", "fz  quant"}
 
 local mtr = {}
+mtr.tik = 0
 mtr.count = 1
 mtr.clock = nil
 mtr.is_running = false
 
-local trk = {}
+trk = {}
 trk.focus = 1
 trk.rec_queued = false
 trk.is_recording = false
@@ -37,8 +37,10 @@ trk.is_resetting = false
 trk.is_clearing = false
 trk.rate_options = {"-200%", "-150%", "-100%", "-75%", "-50%", "50%", "75%", "100%", "150%", "200%"}
 trk.rate_values = {-2, -1.5, -1, -0.75, -0.5, 0.5, 0.75, 1, 1.5, 2}
-trk.freeze_options  = {"1/8", "1/6", "3/16", "1/4", "1/3", "3/8", "1/2", "2/3", "3/4", "1", "5/4", "4/3", "3/2"," 5/3", "7/4"}
-trk.freeze_values = {1/8, 1/6, 3/16, 1/4, 1/3, 3/8, 1/2, 2/3, 3/4, 1, 5/4, 4/3, 3/2, 5/3, 7/4}
+trk.freeze_options  = {"1/16", "1/12", "3/32", "1/8", "1/6", "3/16", "1/4", "1/3", "3/8", "1/2", "2/3", "3/4", "4/4"}
+trk.freeze_values = {1/16, 1/12, 3/32, 1/8, 1/6, 3/16, 1/4, 1/3, 3/8, 1/2, 2/3, 3/4, 1}
+trk.quant_options = {"1/16", "1/12", "3/32", "1/8", "1/6", "3/16", "1/4"}
+trk.quant_values = {1/16, 1/12, 3/32, 1/8, 1/6, 3/16, 1/4}
 
 for i = 1, NUM_TRACKS do  
   trk[i] = {}
@@ -46,6 +48,8 @@ for i = 1, NUM_TRACKS do
   trk[i].pan = 0
   trk[i].rec = 1
   trk[i].dub = 1
+  trk[i].fz_qnt = 6
+  trk[i].fz_mode = 1 
   trk[i].fz_rate = 1 -- freeze rate
   trk[i].fz_pos = 1 -- freeze reset postion
   trk[i].fz_tik = 1 -- current step of ppqn resolution
@@ -53,6 +57,7 @@ for i = 1, NUM_TRACKS do
   trk[i].fz_queued = false
   trk[i].fz_active = false
   trk[i].is_playing = true
+  trk[i].undo_enabled = false
   trk[i].beat_num = 8 -- track length in beats
   trk[i].pos = 0 -- buffer postion in seconds
   trk[i].step = 0 -- current step
@@ -78,11 +83,29 @@ local function toggle_levels(i)
   set_level(i)
 end
 
+local function backup_buffer(action)
+  if action == "save" then
+    local start = trk[trk.focus].s - FADE_TIME
+    local length = trk[trk.focus].l + FADE_TIME * 2
+    softcut.buffer_copy_mono(1, 2, start, start, length, FADE_TIME)
+    trk[trk.focus].undo_enabled = true
+  elseif action == "clear" then
+    if trk[trk.focus].undo_enabled then
+      local start = trk[trk.focus].s - FADE_TIME
+      local length = trk[trk.focus].l + FADE_TIME * 2
+      softcut.buffer_copy_mono(2, 1, start, start, length, FADE_TIME)
+    else
+      softcut.buffer_clear_region_channel(1, trk[trk.focus].s - FADE_TIME, MAX_LENGTH + FADE_TIME * 2)
+    end
+  end
+end
+
 local function set_rec()
   if trk.is_recording then
     softcut.rec_level(trk.focus, trk[trk.focus].rec)
     softcut.pre_level(trk.focus, trk[trk.focus].dub)
     ui.coin = true
+    backup_buffer("save")
   else
     for i = 1, NUM_TRACKS do
       softcut.rec_level(i, 0)
@@ -104,7 +127,7 @@ end
 function set_length(i, num_beats)
   trk[i].l = num_beats * beat_sec
   trk[i].e = trk[i].s + trk[i].l
-  softcut.loop_end(i, trk[i].e)
+  softcut.loop_end(i, trk[i].e + FADE_TIME) -- adding fade improves startpoint reset.
   trk[i].step_max = num_beats * PPQN
   trk[i].d = trk[i].l / trk[i].step_max
   -- set phase quant
@@ -141,15 +164,6 @@ local function reset_tracks()
   end)
 end
 
-local function clear_buffer()
-  clock.sleep(1.2)
-  softcut.buffer_clear_region_channel(1, trk[trk.focus].s - FADE_TIME, MAX_LENGTH + FADE_TIME)
-  trk.is_clearing = true
-  clock.sleep(0.8)
-  trk.is_clearing = false
-  clr_clk = nil
-end
-
 local function set_cutoff(i, val)
   if val < -0.1 then -- lp
     local val = -val
@@ -179,6 +193,16 @@ local function phase_poll(i, pos)
   trk[i].pos = math.floor(util.linlin(0, 1, 1, 120, (pos - trk[i].s) / trk[i].l))
 end
 
+local function set_freeze(i, z)
+  if trk[i].fz_mode == 1 then
+    trk[i].fz_queued = z == 1 and true or false
+  else
+    if z == 1 then
+      trk[i].fz_queued = not trk[i].fz_queued
+    end
+  end
+end
+
 
 ---- clock coroutines and callbacks ----
 local function tempo_change_callback()
@@ -189,7 +213,8 @@ local function tempo_change_callback()
 end
 
 local function transport_start_callback()
-  mtr.count = 0
+  mtr.tik = 0
+  mtr.count = 1
   mtr.is_running = true
   for i = 1, NUM_TRACKS do
     reset_pos(i)
@@ -209,54 +234,50 @@ local function transport_stop_callback()
   end
 end
 
-local function metro_clock()
+local function loopy_clock()
   while true do
-    clock.sync(1)
-    mtr.count = util.wrap(mtr.count + 1, 1, 4)
-    ui.coin = not ui.coin
-  end
-end
-
-local function pos_clock(i)
-  while true do
-    clock.sync(trk[i].beat_num)
-    reset_pos(i)
-  end
-end
-
-local function freez_clock(i)
-  while true do
-    clock.sync(1/4) -- quantize to 1/16
-    if trk[i].fz_queued then
-      if trk[i].fz_active == false then
-        trk[i].fz_active = true
-        trk[i].fz_pos = trk[i].s + trk[i].d * (trk[i].step - 1)
-        trk[i].fz_tik = 0
-        softcut.position(i, trk[i].fz_pos)
-        softcut.rate(i, trk[i].fz_rate)
+    -- metronome
+    if mtr.tik >= PPQN then
+      mtr.count = util.wrap(mtr.count + 1, 1, 4)
+      ui.coin = not ui.coin
+      mtr.tik = 0
+    end
+    mtr.tik = mtr.tik + 1
+    -- track stepper
+    for i = 1, NUM_TRACKS do
+      -- advance steps and reset pos
+      if trk[i].step >= trk[i].step_max then
+        reset_pos(i)
       end
-    else
-      if trk[i].fz_active then
+      trk[i].step = trk[i].step + 1
+      if trk[i].step % trk[i].fz_qnt == 0 then
+        -- set freeze state
+        if trk[i].fz_queued then
+          if trk[i].fz_active == false then
+            trk[i].fz_active = true
+            trk[i].fz_pos = trk[i].s + trk[i].d * (trk[i].step - 1)
+            trk[i].fz_tik = 0
+            softcut.position(i, trk[i].fz_pos)
+            softcut.rate(i, trk[i].fz_rate)
+          end
+        end
+      end
+      if trk[i].fz_active and not trk[i].fz_queued then
         trk[i].fz_active = false
         local fpos = trk[i].s + (trk[i].l / trk[i].step_max) * (trk[i].step - 1)
         softcut.position(i, fpos)
         softcut.rate(i, 1)
       end
-    end
-  end
-end
-
-local function step_clock(i)
-  while true do
-    clock.sync(1 / PPQN)
-    if trk[i].fz_active then
-      if trk[i].fz_tik >= trk[i].fz_max then
-        softcut.position(i, trk[i].fz_pos)
-        trk[i].fz_tik = 0
+      -- reset freeze pos
+      if trk[i].fz_active then
+        if trk[i].fz_tik >= trk[i].fz_max then
+          softcut.position(i, trk[i].fz_pos)
+          trk[i].fz_tik = 0
+        end
+        trk[i].fz_tik = trk[i].fz_tik + 1
       end
-      trk[i].fz_tik = trk[i].fz_tik + 1
     end
-    trk[i].step = trk[i].step + 1
+    clock.sync(1/PPQN)
   end
 end
 
@@ -289,48 +310,54 @@ local function cutoff_display(i, param)
 end
 
 local function init_params()
-  params:add_separator("lwee_params", "loopywee")
+  params:add_separator("lw_params", "loopywee")
   for i = 1, NUM_TRACKS do
-    params:add_group("lwee_track_"..i, "track "..i, 14)
+    params:add_group("lw_track_"..i, "track "..i, 15)
 
-    params:add_separator("lwee_levels"..i, "levels")
+    params:add_separator("lw_levels"..i, "levels")
     
-    params:add_control("lwee_level_"..i, "level", controlspec.new(0, 1, 'lin', 0, 1, ""), function(param) return (round_form(param:get() * 100, 1, "%")) end)
-    params:set_action("lwee_level_"..i, function(x) trk[i].lvl = x set_level(i) end)
+    params:add_control("lw_level_"..i, "level", controlspec.new(0, 1, 'lin', 0, 1, ""), function(param) return (round_form(param:get() * 100, 1, "%")) end)
+    params:set_action("lw_level_"..i, function(x) trk[i].lvl = x set_level(i) end)
 
-    params:add_control("lwee_pan_"..i, "pan", controlspec.new(-1, 1, 'lin', 0, 0, ""), function(param) return pan_display(param:get()) end)
-    params:set_action("lwee_pan_"..i, function(x) trk[i].pan = x softcut.pan(i, x) end)
+    params:add_control("lw_pan_"..i, "pan", controlspec.new(-1, 1, 'lin', 0, 0, ""), function(param) return pan_display(param:get()) end)
+    params:set_action("lw_pan_"..i, function(x) trk[i].pan = x softcut.pan(i, x) end)
 
-    params:add_control("lwee_rec_"..i, "rec", controlspec.new(0, 1, 'lin', 0, 1, ""), function(param) return (round_form(param:get() * 100, 1, "%")) end)
-    params:set_action("lwee_rec_"..i, function(x) trk[i].rec = x set_rec() end)
+    params:add_control("lw_rec_"..i, "rec", controlspec.new(0, 1, 'lin', 0, 1, ""), function(param) return (round_form(param:get() * 100, 1, "%")) end)
+    params:set_action("lw_rec_"..i, function(x) trk[i].rec = x set_rec() end)
 
-    params:add_control("lwee_dub_"..i, "dub", controlspec.new(0, 1, 'lin', 0, 1, ""), function(param) return (round_form(param:get() * 100, 1, "%")) end)
-    params:set_action("lwee_dub_"..i, function(x) trk[i].dub = x set_rec() end)
+    params:add_control("lw_dub_"..i, "dub", controlspec.new(0, 1, 'lin', 0, 1, ""), function(param) return (round_form(param:get() * 100, 1, "%")) end)
+    params:set_action("lw_dub_"..i, function(x) trk[i].dub = x set_rec() end)
 
-    params:add_separator("lwee_filter"..i, "filter")
+    params:add_separator("lw_filter"..i, "filter")
 
-    params:add_control("lwee_cutoff_"..i, "cutoff", controlspec.new(-1, 1, 'lin', 0, 0, ""), function(param) return cutoff_display(i, param:get()) end)
-    params:set_action("lwee_cutoff_"..i, function(x) set_cutoff(i, x) end)
+    params:add_control("lw_cutoff_"..i, "cutoff", controlspec.new(-1, 1, 'lin', 0, 0, ""), function(param) return cutoff_display(i, param:get()) end)
+    params:set_action("lw_cutoff_"..i, function(x) set_cutoff(i, x) end)
 
-    params:add_control("lwee_resonance_"..i, "resonance", controlspec.new(0, 1, 'lin', 0, 0.2, ""), function(param) return (round_form(param:get() * 100, 1, "%")) end)
-    params:set_action("lwee_resonance_"..i, function(x) set_filter_q(i, x) end)
+    params:add_control("lw_resonance_"..i, "resonance", controlspec.new(0, 1, 'lin', 0, 0.2, ""), function(param) return (round_form(param:get() * 100, 1, "%")) end)
+    params:set_action("lw_resonance_"..i, function(x) set_filter_q(i, x) end)
 
-    params:add_separator("lwee_tape_"..i, "tape")
+    params:add_separator("lw_tape_"..i, "tape")
 
-    params:add_number("lwee_tape_length_"..i, "tape length", 2, 64, (8 * i), function(param) return param:get().."beats" end)
-    params:set_action("lwee_tape_length_"..i, function(x) trk[i].beat_num = x set_length(i, x) end)
+    params:add_number("lw_tape_length_"..i, "tape length", 2, 64, (8 * i), function(param) return param:get().."beats" end)
+    params:set_action("lw_tape_length_"..i, function(x) trk[i].beat_num = x set_length(i, x) end)
 
-    params:add_option("lwee_frez_length_"..i, "freeze size", trk.freeze_options, 7)
-    params:set_action("lwee_frez_length_"..i, function(x) trk[i].fz_max = trk.freeze_values[x] * PPQN end)
+    params:add_option("lw_frez_mode_"..i, "freeze mode", {"momt", "hold"}, 1)
+    params:set_action("lw_frez_mode_"..i, function(x) trk[i].fz_mode = x end)
 
-    params:add_option("lwee_frez_rate_"..i, "freeze rate", trk.rate_options, 8)
-    params:set_action("lwee_frez_rate_"..i, function(x) trk[i].fz_rate = trk.rate_values[x] if trk[i].fz_active then softcut.rate(i, trk[i].fz_rate) end end)
+    params:add_option("lw_frez_quant_"..i, "freeze quant", trk.quant_options, 4)
+    params:set_action("lw_frez_quant_"..i, function(x) trk[i].fz_qnt = math.floor(trk.quant_values[x] * 4 * PPQN) end)
 
-    params:add_control("lwee_rate_slew_"..i, "rate slew", controlspec.new(0, 1, 'lin', 0, 0, ""), function(param) return (round_form(param:get(), 0.01, "s")) end)
-    params:set_action("lwee_rate_slew_"..i, function(x) softcut.rate_slew_time(i, x) end)
+    params:add_option("lw_frez_length_"..i, "freeze size", trk.freeze_options, 4)
+    params:set_action("lw_frez_length_"..i, function(x) trk[i].fz_max = math.floor(trk.freeze_values[x] * 4 * PPQN) end)
 
-    params:add_binary("lwee_freeze_trig_"..i, "freeze", "momentary")
-    params:set_action("lwee_freeze_trig_"..i, function(x) trk[i].fz_queued = x == 1 and true or false end)
+    params:add_option("lw_frez_rate_"..i, "freeze rate", trk.rate_options, 8)
+    params:set_action("lw_frez_rate_"..i, function(x) trk[i].fz_rate = trk.rate_values[x] if trk[i].fz_active then softcut.rate(i, trk[i].fz_rate) end end)
+
+    params:add_control("lw_rate_slew_"..i, "rate slew", controlspec.new(0, 1, 'lin', 0, 0, ""), function(param) return (round_form(param:get(), 0.01, "s")) end)
+    params:set_action("lw_rate_slew_"..i, function(x) softcut.rate_slew_time(i, x) end)
+
+    params:add_binary("lw_freeze_trig_"..i, "freeze", "momentary")
+    params:set_action("lw_freeze_trig_"..i, function(z) set_freeze(i, z) end)
   end
   params:bang()
 end
@@ -364,7 +391,7 @@ local function init_softcut()
     softcut.post_filter_rq(i, 2)
 
     softcut.fade_time(i, FADE_TIME)
-    softcut.level_slew_time(i, 0.4)
+    softcut.level_slew_time(i, 0.2)
     softcut.pan_slew_time(i, 0.2)
     softcut.rate_slew_time(i, 0)
     softcut.rate(i, 1)
@@ -392,12 +419,9 @@ function init()
     clock.sync(4)
     mtr.count = 1
     mtr.is_running = true
-    clock.run(metro_clock)
+    clock.run(loopy_clock)
     for i = 1, NUM_TRACKS do
-      clock.run(pos_clock, i)
-      clock.run(step_clock, i)
-      clock.run(freez_clock, i)
-      softcut.position(i, trk[i].s)
+      reset_pos(i)
     end
   end)
   -- call redraw
@@ -408,22 +432,17 @@ end
 function key(n, z)
   if n == 1 then
     ui.k1 = z == 1 and true or false
+    if z == 0 then ui.k2_options = false end
   end
   if n == 2 then
     ui.k2 = z == 1 and true or false
     if ui.k1 then
-      if z == 1 then
-        if ui.clr_clk ~= nil then
-          clock.cancel(ui.clr_clk)
-        end
-        ui.clr_clk = clock.run(clear_buffer)
-      else
-        if trk.is_clearing == false then
-          if ui.clr_clk ~= nil then
-            clock.cancel(ui.clr_clk)
-          end
+      if ui.k2_options then
+        if z == 1 then
           reset_tracks()
         end
+      else
+        if z == 1 then ui.k2_options = true end
       end
     else
       if z == 1 and not ui.k3 then
@@ -433,11 +452,23 @@ function key(n, z)
   elseif n == 3 then
     ui.k3 = z == 1 and true or false
     if ui.k1 then
-      if z == 1 then
-        toggle_levels(trk.focus)
+      if ui.k2_options then
+        if z == 1 then
+          trk.is_clearing = true
+          backup_buffer("clear")
+          clock.run(function()
+            clock.sleep(0.8)
+            trk.is_clearing = false
+            trk[trk.focus].undo_enabled = false
+          end)
+        end
+      else
+        if z == 1 then
+          toggle_levels(trk.focus)
+        end
       end
     else
-      trk[trk.focus].fz_queued = z == 1 and true or (ui.k2 and true or false)
+      set_freeze(trk.focus, z)
     end
   end
 end
@@ -450,10 +481,10 @@ function enc(n, d)
   elseif n == 3 then
     if ui.k1 then
       for i = 1, NUM_TRACKS do
-        params:delta("lwee_"..ui.param_ids[ui.param_focus].."_"..i, d)
+        params:delta("lw_"..ui.param_ids[ui.param_focus].."_"..i, d)
       end
     else
-      params:delta("lwee_"..ui.param_ids[ui.param_focus].."_"..trk.focus, d)
+      params:delta("lw_"..ui.param_ids[ui.param_focus].."_"..trk.focus, d)
     end
   end
 end
@@ -491,15 +522,24 @@ function redraw()
   elseif trk.is_clearing then
     screen.move(64, 12)
     screen.level(15)
-    screen.text_center("cleared")
+    screen.text_center(trk[trk.focus].undo_enabled and "undone" or "cleared")
   else
     if ui.k1 then
-      screen.level(10)
-      screen.move(48, 12)
-      screen.text_center("rst/clr")
-      screen.level(ui.coin and 10 or 15)
-      screen.move(80, 12)
-      screen.text_center(trk[trk.focus].is_playing and "mute" or "unmute")
+      if ui.k2_options then
+        screen.level(ui.coin and 15 or 10)
+        screen.move(48, 12)
+        screen.text_center("reset")
+        screen.level(ui.coin and 10 or 15)
+        screen.move(80, 12)
+        screen.text_center(trk[trk.focus].undo_enabled and "undo" or "clear")
+      else
+        screen.level(10)
+        screen.move(48, 12)
+        screen.text_center(trk[trk.focus].undo_enabled and "rst/undo" or "rst/clear")
+        screen.level(ui.coin and 10 or 15)
+        screen.move(80, 12)
+        screen.text_center(trk[trk.focus].is_playing and "mute" or "unmute")
+      end
     elseif trk[trk.focus].fz_active then
       screen.level(ui.coin and 15 or 0)
       screen.rect(45, 4, 39, 12)
@@ -546,7 +586,7 @@ function redraw()
   screen.text_center(ui.param_names[ui.param_focus])
   screen.level(15)
   screen.move(64, 62)
-  screen.text_center(params:string("lwee_"..ui.param_ids[ui.param_focus].."_"..trk.focus))
+  screen.text_center(params:string("lw_"..ui.param_ids[ui.param_focus].."_"..trk.focus))
   
   screen.update()
 end
