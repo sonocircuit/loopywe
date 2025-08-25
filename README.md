@@ -3,16 +3,19 @@ a clocked softcut looper for a friend
 
 ---
 
-- `K1`: hold for shift function
-- `K2`: queue recording for selected track. recording starts at the beginning of the track and lasts one cycle.
-- `K3`: hold for freeze. release to return to the current playback position.
-- Hold `K1` and tap `K2` to dispaly options:
-  - `K2`: reset the start postitions at the next downbeat
-  - `K3`: undo or clear the selected track
-- Hold `K1` and tap `K3` to mute the selected track.
+#### Instructions:
 
-- `E1`: select track
-- `E2`: select parameter
-- `E3`: set selected parameter. If `K1` is held the parameter is inc/dec for all tracks.
-
-- `bonus`: increase the number of track in the code.
+- `K1`: Hold for **shift** function.
+- `K2`: Queue recording on the selected track. Recording begins at the track’s start and lasts for one full cycle.
+- `K3`: Tap or hold to **freeze** the selected track. Key behavior (momentary/toggle) is set under freeze mode.
+- Hold `K1` and turn `E1` to open options (`clear/reset` or `(un)mute/freeze`):
+  - **clear/reset**
+    - Tap `K2`: clear/undo the selected track.
+    - Tap `K3`: reset the start position of all tracks at the next downbeat.
+  - **(un)mute/freeze**
+    - Tap `K2`: mute/unmute the selected track.
+    - Tap `K3`: freeze all tracks simultaneously.
+- `E1`: Select track.
+- `E2`: Select parameter.
+- `E3`: Adjust selected parameter. If K1 is held, the parameter increases/decreases for all tracks.
+- **Bonus**: Increase the number of tracks in the code.
